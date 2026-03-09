@@ -23,11 +23,15 @@
     const resultsGrid = $('#resultsGrid');
     const resultsStats = $('#resultsStats');
     const toastContainer = $('#toastContainer');
+    const downloadBtn = $('#downloadBtn');
+    const downloadMenu = $('#downloadMenu');
 
     // ── State ──
     // Each entry: { file: File, text: string|null, base64: string|null, mimeType: string|null }
     let uploadedFiles = [];
     let isProcessing = false;
+    // Stores raw result text keyed by filename
+    const resultTexts = new Map();
 
     // ================================================================
     //  API Key Toggle
@@ -163,6 +167,7 @@
                     updateStats();
                     try {
                         const result = await callGemini(apiKey, prompt, item);
+                        resultTexts.set(item.file.name, result);
                         setCardResult(cards[i], result);
                         setCardStatus(cards[i], 'done');
                     } catch (err) {
@@ -182,6 +187,70 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg>
             Process All Files`;
         showToast('All files processed!', 'success');
+    }
+
+    // ================================================================
+    //  Download All
+    // ================================================================
+    downloadBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        downloadMenu.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+        if (!downloadMenu.contains(e.target) && e.target !== downloadBtn) {
+            downloadMenu.classList.remove('open');
+        }
+    });
+    downloadMenu.querySelectorAll('.dropdown-item').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const format = btn.dataset.format;
+            downloadMenu.classList.remove('open');
+            downloadAllAs(format);
+        });
+    });
+
+    function downloadAllAs(format) {
+        if (resultTexts.size === 0) {
+            showToast('No results to download yet.', 'error');
+            return;
+        }
+
+        resultTexts.forEach((text, fileName) => {
+            const baseName = fileName.replace(/\.[^.]+$/, '');
+            let content, mime;
+
+            switch (format) {
+                case 'html':
+                    content = `<!DOCTYPE html>\n<html><head><meta charset="UTF-8"><title>${escapeHtml(baseName)}</title></head>\n<body>\n${renderMarkdown(text)}\n</body></html>`;
+                    mime = 'text/html';
+                    break;
+                case 'py':
+                    content = `# Generated from: ${fileName}\n# Prompt applied via Multi-File Prompt App\n\n"""\n${text}\n"""`;
+                    mime = 'text/x-python';
+                    break;
+                case 'md':
+                    content = text;
+                    mime = 'text/markdown';
+                    break;
+                case 'txt':
+                default:
+                    content = text;
+                    mime = 'text/plain';
+                    break;
+            }
+
+            const blob = new Blob([content], { type: mime });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${baseName}.${format}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
+
+        showToast(`Downloaded ${resultTexts.size} file${resultTexts.size !== 1 ? 's' : ''} as .${format}`, 'success');
     }
 
     // ================================================================
@@ -212,7 +281,7 @@
             contents: [{ parts }],
             generationConfig: {
                 temperature: 0.7,
-                maxOutputTokens: 8192
+                maxOutputTokens: 65536
             }
         };
 
