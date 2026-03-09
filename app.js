@@ -217,13 +217,17 @@
         });
     });
 
-    function downloadAllAs(format) {
+    async function downloadAllAs(format) {
         if (resultTexts.size === 0) {
             showToast('No results to download yet.', 'error');
             return;
         }
 
-        resultTexts.forEach((text, fileName) => {
+        const entries = [...resultTexts.entries()];
+        showToast(`Downloading ${entries.length} file${entries.length !== 1 ? 's' : ''} as .${format}…`, 'success');
+
+        for (let i = 0; i < entries.length; i++) {
+            const [fileName, text] = entries[i];
             const baseName = fileName.replace(/\.[^.]+$/, '');
             const { content, mime } = prepareContent(text, format, fileName);
 
@@ -236,9 +240,14 @@
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-        });
 
-        showToast(`Downloaded ${resultTexts.size} file${resultTexts.size !== 1 ? 's' : ''} as .${format}`, 'success');
+            // Stagger downloads to avoid browser throttling
+            if (i < entries.length - 1) {
+                await new Promise(r => setTimeout(r, 300));
+            }
+        }
+
+        showToast(`Finished downloading ${entries.length} file${entries.length !== 1 ? 's' : ''} as .${format}`, 'success');
     }
 
     // Strip markdown code fences (```html ... ``` or ```...```) from LLM output
