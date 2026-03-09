@@ -72,6 +72,49 @@
         return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
     }
 
+    function isPptx(file) {
+        return file.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+            || file.name.toLowerCase().endsWith('.pptx');
+    }
+
+    // Extract structured text from PPTX using JSZip
+    async function extractPptxText(file) {
+        const data = await file.arrayBuffer();
+        const zip = await JSZip.loadAsync(data);
+
+        // Find all slide XML files (ppt/slides/slide1.xml, slide2.xml, ...)
+        const slideFiles = Object.keys(zip.files)
+            .filter(name => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+            .sort((a, b) => {
+                const numA = parseInt(a.match(/slide(\d+)/i)[1]);
+                const numB = parseInt(b.match(/slide(\d+)/i)[1]);
+                return numA - numB;
+            });
+
+        if (slideFiles.length === 0) {
+            throw new Error('No slides found in PPTX file');
+        }
+
+        const slides = [];
+        for (const slidePath of slideFiles) {
+            const xml = await zip.file(slidePath).async('string');
+            // Parse XML and extract all text runs
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(xml, 'application/xml');
+            // Get all <a:t> text elements (PowerPoint text runs)
+            const textNodes = doc.getElementsByTagNameNS('http://schemas.openxmlformats.org/drawingml/2006/main', 't');
+            const texts = [];
+            for (const node of textNodes) {
+                const t = node.textContent.trim();
+                if (t) texts.push(t);
+            }
+            const slideNum = slidePath.match(/slide(\d+)/i)[1];
+            slides.push(`--- Slide ${slideNum} ---\n${texts.join('\n')}`);
+        }
+
+        return slides.join('\n\n');
+    }
+
     function addFiles(fileListObj) {
         for (const file of fileListObj) {
             // Avoid duplicates by name + size
@@ -142,12 +185,16 @@
             <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
             Processing…`;
 
-        // Read all files — PDFs as base64, everything else as text
+        // Read all files — PDFs as base64, PPTX as extracted text, everything else as text
         await Promise.all(uploadedFiles.map(async (item) => {
             if (isPdf(item.file)) {
                 if (item.base64 === null) {
                     item.base64 = await readFileAsBase64(item.file);
                     item.mimeType = 'application/pdf';
+                }
+            } else if (isPptx(item.file)) {
+                if (item.text === null) {
+                    item.text = await extractPptxText(item.file);
                 }
             } else {
                 if (item.text === null) {
