@@ -225,7 +225,8 @@
 
             switch (format) {
                 case 'html':
-                    content = `<!DOCTYPE html>\n<html><head><meta charset="UTF-8"><title>${escapeHtml(baseName)}</title></head>\n<body>\n${renderMarkdown(text)}\n</body></html>`;
+                    // The LLM response is already valid HTML — save as-is
+                    content = text;
                     mime = 'text/html';
                     break;
                 case 'py':
