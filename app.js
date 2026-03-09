@@ -25,7 +25,8 @@
     const toastContainer = $('#toastContainer');
 
     // ── State ──
-    let uploadedFiles = []; // { file: File, text: string|null }
+    // Each entry: { file: File, text: string|null, base64: string|null, mimeType: string|null }
+    let uploadedFiles = [];
     let isProcessing = false;
 
     // ================================================================
@@ -61,11 +62,15 @@
         fileInput.value = '';
     });
 
+    function isPdf(file) {
+        return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    }
+
     function addFiles(fileListObj) {
         for (const file of fileListObj) {
             // Avoid duplicates by name + size
             if (uploadedFiles.some(f => f.file.name === file.name && f.file.size === file.size)) continue;
-            uploadedFiles.push({ file, text: null });
+            uploadedFiles.push({ file, text: null, base64: null, mimeType: null });
         }
         renderFileList();
     }
@@ -129,10 +134,17 @@
             <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
             Processing…`;
 
-        // Read all files as text first
+        // Read all files — PDFs as base64, everything else as text
         await Promise.all(uploadedFiles.map(async (item) => {
-            if (item.text === null) {
-                item.text = await readFileAsText(item.file);
+            if (isPdf(item.file)) {
+                if (item.base64 === null) {
+                    item.base64 = await readFileAsBase64(item.file);
+                    item.mimeType = 'application/pdf';
+                }
+            } else {
+                if (item.text === null) {
+                    item.text = await readFileAsText(item.file);
+                }
             }
         }));
 
@@ -150,7 +162,7 @@
                     setCardStatus(cards[i], 'processing');
                     updateStats();
                     try {
-                        const result = await callGemini(apiKey, prompt, item.file.name, item.text);
+                        const result = await callGemini(apiKey, prompt, item);
                         setCardResult(cards[i], result);
                         setCardStatus(cards[i], 'done');
                     } catch (err) {
@@ -175,15 +187,29 @@
     // ================================================================
     //  Gemini API
     // ================================================================
-    async function callGemini(apiKey, prompt, fileName, fileContent) {
+    async function callGemini(apiKey, prompt, fileItem) {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${encodeURIComponent(apiKey)}`;
 
+        // Build parts array: prompt text + file content
+        const parts = [
+            { text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` }
+        ];
+
+        if (fileItem.base64) {
+            // PDF or binary file → send as inline data
+            parts.push({
+                inlineData: {
+                    mimeType: fileItem.mimeType,
+                    data: fileItem.base64
+                }
+            });
+        } else {
+            // Text file → append as text
+            parts[0].text += `\n\n${fileItem.text}`;
+        }
+
         const body = {
-            contents: [{
-                parts: [
-                    { text: `${prompt}\n\n--- FILE: ${fileName} ---\n\n${fileContent}` }
-                ]
-            }],
+            contents: [{ parts }],
             generationConfig: {
                 temperature: 0.7,
                 maxOutputTokens: 8192
@@ -337,6 +363,19 @@
             reader.onload = () => resolve(reader.result);
             reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
             reader.readAsText(file);
+        });
+    }
+
+    function readFileAsBase64(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                // result is "data:<mime>;base64,<data>" — extract just the base64 part
+                const base64 = reader.result.split(',')[1];
+                resolve(base64);
+            };
+            reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+            reader.readAsDataURL(file);
         });
     }
 
