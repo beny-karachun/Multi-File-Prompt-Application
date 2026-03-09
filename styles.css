@@ -612,6 +612,44 @@ body::before {
     color: var(--accent-light);
 }
 
+/* Card-level download dropdown */
+.card-download-dropdown {
+    display: inline-flex;
+}
+
+.card-download-dropdown .download-single-btn {
+    background: var(--bg-glass);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    padding: 5px 10px;
+    font-size: 0.72rem;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: all var(--transition);
+}
+
+.card-download-dropdown .download-single-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent-light);
+    background: var(--accent-glow);
+}
+
+.card-download-dropdown .download-single-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.card-download-dropdown .dropdown-menu {
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 100px;
+}
+
 /* Results Grid */
 .results-grid {
     display: grid;

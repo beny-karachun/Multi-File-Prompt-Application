@@ -159,7 +159,7 @@
         // Prepare results UI
         resultsSection.classList.add('visible');
         resultsGrid.innerHTML = '';
-        const cards = uploadedFiles.map((item, i) => createResultCard(item.file.name, i));
+        const cards = uploadedFiles.map((item, i) => createResultCard(item, i));
         updateStats();
 
         // Staggered parallel calls
@@ -204,6 +204,10 @@
         if (!downloadMenu.contains(e.target) && e.target !== downloadBtn) {
             downloadMenu.classList.remove('open');
         }
+        // Also close any card download dropdowns
+        document.querySelectorAll('.card-dl-menu.open').forEach(m => {
+            if (!m.parentElement.contains(e.target)) m.classList.remove('open');
+        });
     });
     downloadMenu.querySelectorAll('.dropdown-item').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -221,28 +225,7 @@
 
         resultTexts.forEach((text, fileName) => {
             const baseName = fileName.replace(/\.[^.]+$/, '');
-            let content, mime;
-
-            switch (format) {
-                case 'html':
-                    // The LLM response is already valid HTML — save as-is
-                    content = text;
-                    mime = 'text/html';
-                    break;
-                case 'py':
-                    content = `# Generated from: ${fileName}\n# Prompt applied via Multi-File Prompt App\n\n"""\n${text}\n"""`;
-                    mime = 'text/x-python';
-                    break;
-                case 'md':
-                    content = text;
-                    mime = 'text/markdown';
-                    break;
-                case 'txt':
-                default:
-                    content = text;
-                    mime = 'text/plain';
-                    break;
-            }
+            const { content, mime } = prepareContent(text, format, fileName);
 
             const blob = new Blob([content], { type: mime });
             const url = URL.createObjectURL(blob);
@@ -256,6 +239,43 @@
         });
 
         showToast(`Downloaded ${resultTexts.size} file${resultTexts.size !== 1 ? 's' : ''} as .${format}`, 'success');
+    }
+
+    // Strip markdown code fences (```html ... ``` or ```...```) from LLM output
+    function stripCodeFences(text) {
+        let s = text.trim();
+        // Remove opening ```html or ``` (with optional language tag)
+        s = s.replace(/^```[a-zA-Z]*\s*\n?/, '');
+        // Remove closing ```
+        s = s.replace(/\n?```\s*$/, '');
+        return s.trim();
+    }
+
+    function prepareContent(text, format, fileName) {
+        switch (format) {
+            case 'html': return { content: stripCodeFences(text), mime: 'text/html' };
+            case 'py': return { content: `# Generated from: ${fileName}\n# Prompt applied via Multi-File Prompt App\n\n"""\n${text}\n"""`, mime: 'text/x-python' };
+            case 'md': return { content: text, mime: 'text/markdown' };
+            case 'txt':
+            default: return { content: text, mime: 'text/plain' };
+        }
+    }
+
+    function downloadSingleResult(fileName, format) {
+        const text = resultTexts.get(fileName);
+        if (!text) { showToast('No result to download.', 'error'); return; }
+        const baseName = fileName.replace(/\.[^.]+$/, '');
+        const { content, mime } = prepareContent(text, format, fileName);
+        const blob = new Blob([content], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${baseName}.${format}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast(`Downloaded ${baseName}.${format}`, 'success');
     }
 
     // ================================================================
@@ -311,7 +331,11 @@
     // ================================================================
     //  Result Cards
     // ================================================================
-    function createResultCard(fileName, index) {
+    // Map cards to their fileItems for retry/download
+    const cardFileMap = new WeakMap();
+
+    function createResultCard(fileItem, index) {
+        const fileName = fileItem.file.name;
         const card = document.createElement('div');
         card.className = 'result-card status-pending';
         card.style.animationDelay = `${index * 80}ms`;
@@ -323,6 +347,22 @@
                     <span class="name" title="${escapeHtml(fileName)}">${escapeHtml(fileName)}</span>
                 </div>
                 <div class="card-actions">
+                    <button class="retry-header-btn" title="Retry this file" disabled>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                        Retry
+                    </button>
+                    <div class="dropdown card-download-dropdown">
+                        <button class="download-single-btn" title="Download as…" disabled>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Download
+                        </button>
+                        <div class="dropdown-menu card-dl-menu">
+                            <button class="dropdown-item" data-format="txt">.txt</button>
+                            <button class="dropdown-item" data-format="md">.md</button>
+                            <button class="dropdown-item" data-format="html">.html</button>
+                            <button class="dropdown-item" data-format="py">.py</button>
+                        </div>
+                    </div>
                     <button class="copy-btn" title="Copy result" disabled>
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
                         Copy
@@ -336,6 +376,32 @@
                     <div class="shimmer-line"></div>
                 </div>
             </div>`;
+
+        // Store mapping
+        cardFileMap.set(card, fileItem);
+
+        // Retry button in header
+        card.querySelector('.retry-header-btn').addEventListener('click', () => {
+            retryCard(card, fileItem);
+        });
+
+        // Download dropdown in header
+        const dlBtn = card.querySelector('.download-single-btn');
+        const dlMenu = card.querySelector('.card-dl-menu');
+        dlBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // Close other open menus first
+            document.querySelectorAll('.card-dl-menu.open').forEach(m => { if (m !== dlMenu) m.classList.remove('open'); });
+            dlMenu.classList.toggle('open');
+        });
+        dlMenu.querySelectorAll('.dropdown-item').forEach(item => {
+            item.addEventListener('click', () => {
+                dlMenu.classList.remove('open');
+                const fmt = item.dataset.format;
+                downloadSingleResult(fileItem.file.name, fmt);
+            });
+        });
+
         resultsGrid.appendChild(card);
         return card;
     }
@@ -350,9 +416,13 @@
     function setCardResult(card, text) {
         const body = card.querySelector('.card-body');
         body.innerHTML = `<div class="result-content">${renderMarkdown(text)}</div>`;
-        // Enable copy
+        // Enable copy, download, retry
         const copyBtn = card.querySelector('.copy-btn');
+        const downloadBtn = card.querySelector('.download-single-btn');
+        const retryBtn = card.querySelector('.retry-header-btn');
         copyBtn.disabled = false;
+        downloadBtn.disabled = false;
+        retryBtn.disabled = false;
         copyBtn.addEventListener('click', () => {
             navigator.clipboard.writeText(text).then(() => {
                 copyBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
@@ -369,12 +439,10 @@
             <div class="error-content">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
                 <span>${escapeHtml(message)}</span>
-            </div>
-            <button class="retry-btn">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
-                Retry
-            </button>`;
-        body.querySelector('.retry-btn').addEventListener('click', () => retryCard(card, fileItem));
+            </div>`;
+        // Enable retry button in header
+        const retryBtn = card.querySelector('.retry-header-btn');
+        retryBtn.disabled = false;
     }
 
     async function retryCard(card, fileItem) {
