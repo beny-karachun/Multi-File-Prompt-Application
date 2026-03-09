@@ -30,6 +30,8 @@
     // Each entry: { file: File, text: string|null, base64: string|null, mimeType: string|null }
     let uploadedFiles = [];
     let isProcessing = false;
+    let lastApiKey = '';
+    let lastPrompt = '';
     // Stores raw result text keyed by filename
     const resultTexts = new Map();
 
@@ -134,6 +136,8 @@
     async function startProcessing(apiKey, prompt) {
         isProcessing = true;
         processBtn.disabled = true;
+        lastApiKey = apiKey;
+        lastPrompt = prompt;
         processBtn.innerHTML = `
             <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
             Processing…`;
@@ -171,7 +175,7 @@
                         setCardResult(cards[i], result);
                         setCardStatus(cards[i], 'done');
                     } catch (err) {
-                        setCardError(cards[i], err.message || 'Unknown error');
+                        setCardError(cards[i], err.message || 'Unknown error', item);
                         setCardStatus(cards[i], 'error');
                     }
                     updateStats();
@@ -358,13 +362,38 @@
         });
     }
 
-    function setCardError(card, message) {
+    function setCardError(card, message, fileItem) {
         const body = card.querySelector('.card-body');
         body.innerHTML = `
             <div class="error-content">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
                 <span>${escapeHtml(message)}</span>
-            </div>`;
+            </div>
+            <button class="retry-btn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                Retry
+            </button>`;
+        body.querySelector('.retry-btn').addEventListener('click', () => retryCard(card, fileItem));
+    }
+
+    async function retryCard(card, fileItem) {
+        if (!lastApiKey) { showToast('No API key available for retry.', 'error'); return; }
+        setCardStatus(card, 'processing');
+        // Reset body to shimmer
+        const body = card.querySelector('.card-body');
+        body.innerHTML = `<div class="placeholder shimmer"><div class="shimmer-line"></div><div class="shimmer-line"></div><div class="shimmer-line"></div></div>`;
+        updateStats();
+        try {
+            const result = await callGemini(lastApiKey, lastPrompt, fileItem);
+            resultTexts.set(fileItem.file.name, result);
+            setCardResult(card, result);
+            setCardStatus(card, 'done');
+            showToast(`${fileItem.file.name} retried successfully!`, 'success');
+        } catch (err) {
+            setCardError(card, err.message || 'Unknown error', fileItem);
+            setCardStatus(card, 'error');
+        }
+        updateStats();
     }
 
     function updateStats() {
