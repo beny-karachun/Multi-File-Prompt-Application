@@ -872,6 +872,42 @@ body::before {
     text-decoration: underline;
 }
 
+/* Headings beyond h3 (marked can emit h4–h6) */
+.result-content h4,
+.result-content h5,
+.result-content h6 {
+    margin: 1em 0 0.4em;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* Tables (GFM) */
+.result-content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.8em 0;
+    font-size: 0.82rem;
+}
+
+.result-content th,
+.result-content td {
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.result-content th {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* Fallback when markdown libs fail to load */
+.result-content .md-fallback {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 /* Error content */
 .error-content {
     color: var(--red);

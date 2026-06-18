@@ -366,22 +366,44 @@
             }
         };
 
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
+        // Retry on rate limits (429) and transient server errors (500/503)
+        // with exponential backoff, honoring Retry-After when present.
+        const MAX_ATTEMPTS = 4;
+        const RETRYABLE = new Set([429, 500, 503]);
+        let lastErr;
 
-        if (!resp.ok) {
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+
+            if (resp.ok) {
+                const data = await resp.json();
+                const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!text) throw new Error('Empty response from Gemini');
+                return text;
+            }
+
             const errData = await resp.json().catch(() => ({}));
             const msg = errData?.error?.message || `HTTP ${resp.status}`;
-            throw new Error(msg);
+            lastErr = new Error(msg);
+
+            // Non-retryable, or out of attempts → fail now.
+            if (!RETRYABLE.has(resp.status) || attempt === MAX_ATTEMPTS - 1) {
+                throw lastErr;
+            }
+
+            // Backoff: Retry-After header if given, else exponential (1s, 2s, 4s).
+            const retryAfter = parseFloat(resp.headers.get('Retry-After'));
+            const waitMs = Number.isFinite(retryAfter)
+                ? retryAfter * 1000
+                : 1000 * Math.pow(2, attempt);
+            await new Promise(r => setTimeout(r, waitMs));
         }
 
-        const data = await resp.json();
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!text) throw new Error('Empty response from Gemini');
-        return text;
+        throw lastErr || new Error('Request failed');
     }
 
     // ================================================================
@@ -532,49 +554,22 @@
     }
 
     // ================================================================
-    //  Lightweight Markdown Renderer
+    //  Markdown Renderer (marked + DOMPurify)
     // ================================================================
+    // Configure marked once, if available.
+    if (window.marked) {
+        marked.setOptions({ gfm: true, breaks: true });
+    }
+
     function renderMarkdown(text) {
-        let html = escapeHtml(text);
-
-        // Code blocks (``` ... ```)
-        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
-            `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`
-        );
-
-        // Inline code
-        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-        // Headers
-        html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-        html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-        html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-
-        // Bold & Italic
-        html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-        html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-        // Blockquote
-        html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-
-        // Unordered lists
-        html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-        html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
-
-        // Ordered lists
-        html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-
-        // Links
-        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-
-        // Paragraphs — wrap remaining lines
-        html = html.replace(/^(?!<[a-z])((?!<\/)[^\n]+)$/gm, '<p>$1</p>');
-
-        // Clean up empty paragraphs
-        html = html.replace(/<p>\s*<\/p>/g, '');
-
-        return html;
+        // Primary path: marked for parsing, DOMPurify to sanitize the result.
+        if (window.marked && window.DOMPurify) {
+            const rawHtml = marked.parse(text);
+            const clean = DOMPurify.sanitize(rawHtml, { ADD_ATTR: ['target', 'rel'] });
+            return clean;
+        }
+        // Fallback if the CDN libs failed to load: render as escaped, pre-wrapped text.
+        return `<pre class="md-fallback">${escapeHtml(text)}</pre>`;
     }
 
     // ================================================================
