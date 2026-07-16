@@ -42,7 +42,9 @@
             keyPlaceholder: 'Enter your Anthropic API key (sk-ant-…)',
             maxTokens: 64000,
             models: [
+                { id: 'claude-fable-5', label: 'Claude Fable 5' },
                 { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+                { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
                 { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
                 { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
             ],
@@ -53,6 +55,10 @@
             keyPlaceholder: 'Enter your OpenAI API key (sk-…)',
             maxTokens: 64000,
             models: [
+                { id: 'gpt-5.6', label: 'GPT-5.6 (Sol)' },
+                { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+                { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+                { id: 'chat-latest', label: 'ChatGPT Instant (latest)' },
                 { id: 'gpt-5.5', label: 'GPT-5.5' },
                 { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini' },
                 { id: 'gpt-5.4-nano', label: 'GPT-5.4 nano' },
