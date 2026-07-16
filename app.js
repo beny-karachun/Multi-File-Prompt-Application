@@ -27,6 +27,7 @@
     const downloadMenu = $('#downloadMenu');
     const providerSelect = $('#providerSelect');
     const modelSelect = $('#modelSelect');
+    const reasoningSelect = $('#reasoningSelect');
 
     // ================================================================
     //  Providers
@@ -36,16 +37,29 @@
     // A model entry may carry extra per-model request params (e.g. Gemini
     // thinkingLevel). Models are selected by index, so the same id can appear
     // more than once with different params.
+    const EFFORT_LABELS = {
+        none: 'None',
+        low: 'Low',
+        medium: 'Medium',
+        high: 'High',
+        xhigh: 'Extra high',
+        max: 'Maximum',
+    };
+    const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'max'];
+    const CLAUDE_XHIGH_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+    const OPENAI_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'];
+    const OPENAI_56_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+
     const PROVIDERS = {
         claude: {
             label: 'Anthropic Claude',
             keyPlaceholder: 'Enter your Anthropic API key (sk-ant-…)',
             maxTokens: 64000,
             models: [
-                { id: 'claude-fable-5', label: 'Claude Fable 5' },
-                { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
-                { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
-                { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+                { id: 'claude-fable-5', label: 'Claude Fable 5', effortLevels: CLAUDE_XHIGH_EFFORTS, defaultEffort: 'high' },
+                { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', effortLevels: CLAUDE_XHIGH_EFFORTS, defaultEffort: 'high' },
+                { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', effortLevels: CLAUDE_XHIGH_EFFORTS, defaultEffort: 'high' },
+                { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', effortLevels: CLAUDE_EFFORTS, defaultEffort: 'high' },
                 { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
             ],
             stream: streamClaude,
@@ -55,13 +69,13 @@
             keyPlaceholder: 'Enter your OpenAI API key (sk-…)',
             maxTokens: 64000,
             models: [
-                { id: 'gpt-5.6', label: 'GPT-5.6 (Sol)' },
-                { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
-                { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+                { id: 'gpt-5.6', label: 'GPT-5.6 (Sol)', effortLevels: OPENAI_56_EFFORTS, defaultEffort: 'medium' },
+                { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', effortLevels: OPENAI_56_EFFORTS, defaultEffort: 'medium' },
+                { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', effortLevels: OPENAI_56_EFFORTS, defaultEffort: 'medium' },
                 { id: 'chat-latest', label: 'ChatGPT Instant (latest)' },
-                { id: 'gpt-5.5', label: 'GPT-5.5' },
-                { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini' },
-                { id: 'gpt-5.4-nano', label: 'GPT-5.4 nano' },
+                { id: 'gpt-5.5', label: 'GPT-5.5', effortLevels: OPENAI_EFFORTS, defaultEffort: 'medium' },
+                { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini', effortLevels: OPENAI_EFFORTS, defaultEffort: 'none' },
+                { id: 'gpt-5.4-nano', label: 'GPT-5.4 nano', effortLevels: OPENAI_EFFORTS, defaultEffort: 'none' },
             ],
             stream: streamOpenAI,
         },
@@ -89,6 +103,7 @@
     let lastPrompt = '';
     let lastProvider = 'claude';
     let lastModel = PROVIDERS.claude.models[0]; // model descriptor object
+    let lastReasoningEffort = lastModel.defaultEffort;
     // Remembers a key per provider so switching providers doesn't lose it
     const apiKeys = {};
     // Stores raw result text keyed by filename
@@ -115,11 +130,38 @@
             .map((m, i) => `<option value="${i}">${escapeHtml(m.label)}</option>`)
             .join('');
         modelSelect.value = '0';
+        populateReasoningEfforts();
     }
 
     function currentModel() {
         const models = PROVIDERS[currentProvider()].models;
         return models[Number(modelSelect.value)] || models[0];
+    }
+
+    function populateReasoningEfforts() {
+        const model = currentModel();
+        const levels = model.effortLevels || [];
+
+        if (!levels.length) {
+            const fixedLabel = model.thinkingLevel
+                ? `Reasoning: ${EFFORT_LABELS[model.thinkingLevel.toLowerCase()] || model.thinkingLevel} (preset)`
+                : 'Reasoning: Not configurable';
+            reasoningSelect.innerHTML = `<option value="">${escapeHtml(fixedLabel)}</option>`;
+            reasoningSelect.disabled = true;
+            reasoningSelect.title = fixedLabel;
+            return;
+        }
+
+        reasoningSelect.innerHTML = levels
+            .map(level => `<option value="${level}">Reasoning: ${EFFORT_LABELS[level]}</option>`)
+            .join('');
+        reasoningSelect.disabled = false;
+        reasoningSelect.value = model.defaultEffort || levels[0];
+        reasoningSelect.title = 'Controls reasoning depth, latency, and token use';
+    }
+
+    function currentReasoningEffort() {
+        return reasoningSelect.disabled ? null : (reasoningSelect.value || null);
     }
 
     function syncProviderUI() {
@@ -132,7 +174,7 @@
         populateModels();
         syncProviderUI();
     });
-    modelSelect.addEventListener('change', () => { /* selection read at process time */ });
+    modelSelect.addEventListener('change', populateReasoningEfforts);
     apiKeyInput.addEventListener('input', () => {
         apiKeys[currentProvider()] = apiKeyInput.value;
     });
@@ -280,16 +322,17 @@
         const prompt = promptText.value.trim();
         if (!prompt) { showToast('Please enter a prompt.', 'error'); promptText.focus(); return; }
 
-        startProcessing(apiKey, prompt, currentProvider(), currentModel());
+        startProcessing(apiKey, prompt, currentProvider(), currentModel(), currentReasoningEffort());
     });
 
-    async function startProcessing(apiKey, prompt, provider, model) {
+    async function startProcessing(apiKey, prompt, provider, model, reasoningEffort) {
         isProcessing = true;
         processBtn.disabled = true;
         lastApiKey = apiKey;
         lastPrompt = prompt;
         lastProvider = provider;
         lastModel = model;
+        lastReasoningEffort = reasoningEffort;
         processBtn.innerHTML = `
             <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
             Processing…`;
@@ -327,7 +370,7 @@
                     updateStats();
                     try {
                         const pre = beginCardStream(cards[i]);
-                        const result = await streamModel(provider, model, apiKey, prompt, item,
+                        const result = await streamModel(provider, model, reasoningEffort, apiKey, prompt, item,
                             (_, full) => { pre.textContent = full; pre.scrollTop = pre.scrollHeight; });
                         resultTexts.set(item.file.name, result);
                         setCardResult(cards[i], result);
@@ -448,12 +491,12 @@
     // ================================================================
     //  Model dispatch (streaming)
     // ================================================================
-    // streamModel(provider, modelObj, apiKey, prompt, fileItem, onDelta) → final text.
+    // streamModel(provider, modelObj, reasoningEffort, apiKey, prompt, fileItem, onDelta) → final text.
     // onDelta(deltaText, fullText) is called as tokens arrive.
-    function streamModel(provider, model, apiKey, prompt, fileItem, onDelta) {
+    function streamModel(provider, model, reasoningEffort, apiKey, prompt, fileItem, onDelta) {
         const cfg = PROVIDERS[provider];
         if (!cfg) throw new Error(`Unknown provider: ${provider}`);
-        return cfg.stream(apiKey, model, prompt, fileItem, cfg.maxTokens, onDelta);
+        return cfg.stream(apiKey, model, prompt, fileItem, cfg.maxTokens, onDelta, reasoningEffort);
     }
 
     // Shared SSE consumer. Retries the *connection* on rate limits (429) and
@@ -515,7 +558,7 @@
     }
 
     // ── Anthropic Claude — POST /v1/messages (stream) ──
-    async function streamClaude(apiKey, model, prompt, fileItem, maxTokens, onDelta) {
+    async function streamClaude(apiKey, model, prompt, fileItem, maxTokens, onDelta, reasoningEffort) {
         const content = [{ type: 'text', text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` }];
         if (fileItem.base64) {
             content.push({
@@ -524,6 +567,16 @@
             });
         } else {
             content[0].text += `\n\n${fileItem.text}`;
+        }
+
+        const requestBody = {
+            model: model.id,
+            max_tokens: maxTokens,
+            stream: true,
+            messages: [{ role: 'user', content }]
+        };
+        if (reasoningEffort) {
+            requestBody.output_config = { effort: reasoningEffort };
         }
 
         return consumeSSE('https://api.anthropic.com/v1/messages', {
@@ -535,12 +588,7 @@
                 // Required for direct browser (CORS) calls
                 'anthropic-dangerous-direct-browser-access': 'true'
             },
-            body: JSON.stringify({
-                model: model.id,
-                max_tokens: maxTokens,
-                stream: true,
-                messages: [{ role: 'user', content }]
-            })
+            body: JSON.stringify(requestBody)
         }, (json) => {
             // Text arrives as content_block_delta events with a text_delta
             if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta') {
@@ -551,7 +599,7 @@
     }
 
     // ── OpenAI ChatGPT — POST /v1/chat/completions (stream) ──
-    async function streamOpenAI(apiKey, model, prompt, fileItem, maxTokens, onDelta) {
+    async function streamOpenAI(apiKey, model, prompt, fileItem, maxTokens, onDelta, reasoningEffort) {
         let content;
         if (fileItem.base64) {
             content = [
@@ -568,19 +616,24 @@
             content = `${prompt}\n\n--- FILE: ${fileItem.file.name} ---\n\n${fileItem.text}`;
         }
 
+        const requestBody = {
+            model: model.id,
+            // GPT-5.x are reasoning models → max_completion_tokens (not max_tokens)
+            max_completion_tokens: maxTokens,
+            stream: true,
+            messages: [{ role: 'user', content }]
+        };
+        if (reasoningEffort) {
+            requestBody.reasoning_effort = reasoningEffort;
+        }
+
         return consumeSSE('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${apiKey}`
             },
-            body: JSON.stringify({
-                model: model.id,
-                // GPT-5.x are reasoning models → max_completion_tokens (not max_tokens)
-                max_completion_tokens: maxTokens,
-                stream: true,
-                messages: [{ role: 'user', content }]
-            })
+            body: JSON.stringify(requestBody)
         }, (json) => json.choices?.[0]?.delta?.content || '', onDelta, 'OpenAI');
     }
 
@@ -738,7 +791,7 @@
         const pre = beginCardStream(card);
         updateStats();
         try {
-            const result = await streamModel(lastProvider, lastModel, lastApiKey, lastPrompt, fileItem,
+            const result = await streamModel(lastProvider, lastModel, lastReasoningEffort, lastApiKey, lastPrompt, fileItem,
                 (_, full) => { pre.textContent = full; pre.scrollTop = pre.scrollHeight; });
             resultTexts.set(fileItem.file.name, result);
             setCardResult(card, result);
