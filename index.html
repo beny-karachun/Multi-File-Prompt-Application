@@ -4,9 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-File Prompt Processor — Gemini AI</title>
+    <title>Multi-File Prompt Processor — Claude, ChatGPT &amp; Gemini</title>
     <meta name="description"
-        content="Process multiple files in parallel through Gemini 2.5 Pro with a single prompt. Upload files, paste your prompt, and get AI-powered results instantly.">
+        content="Process multiple files in parallel through Claude, ChatGPT, or Gemini with a single prompt. Upload files, paste your prompt, and get AI-powered results instantly.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
@@ -34,7 +34,10 @@
                     </svg>
                     <h1>Multi-File Prompt</h1>
                 </div>
-                <span class="badge">Gemini 3.1 Pro Preview</span>
+                <div class="model-selectors">
+                    <select id="providerSelect" class="select" aria-label="AI provider"></select>
+                    <select id="modelSelect" class="select" aria-label="Model"></select>
+                </div>
             </div>
             <div class="header-right">
                 <div class="api-key-group">

@@ -126,6 +126,47 @@ body::before {
     text-transform: uppercase;
 }
 
+/* Provider / model selectors */
+.model-selectors {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.select {
+    padding: 7px 30px 7px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-glass);
+    color: var(--text-primary);
+    font-family: var(--font-sans, inherit);
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border var(--transition), box-shadow var(--transition);
+    /* custom chevron */
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8a99' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+}
+
+.select:hover {
+    border-color: var(--accent);
+}
+
+.select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.select option {
+    background: var(--bg-primary, #16161e);
+    color: var(--text-primary);
+}
+
 .header-right {
     display: flex;
     align-items: center;
@@ -843,6 +884,30 @@ body::before {
 .result-content pre code {
     background: none;
     padding: 0;
+}
+
+/* Live streaming output (shown while tokens arrive, before final markdown render) */
+.streaming-text {
+    margin: 0;
+    max-height: 360px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+}
+
+/* Blinking cursor at the end of streaming text */
+.streaming-text::after {
+    content: '▋';
+    color: var(--accent-light);
+    animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+    to { visibility: hidden; }
 }
 
 .result-content ul,

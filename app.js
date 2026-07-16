@@ -25,6 +25,55 @@
     const toastContainer = $('#toastContainer');
     const downloadBtn = $('#downloadBtn');
     const downloadMenu = $('#downloadMenu');
+    const providerSelect = $('#providerSelect');
+    const modelSelect = $('#modelSelect');
+
+    // ================================================================
+    //  Providers
+    // ================================================================
+    // Responses are streamed (SSE), so generous output ceilings are safe —
+    // streaming avoids the HTTP timeout that long non-streaming calls hit.
+    // A model entry may carry extra per-model request params (e.g. Gemini
+    // thinkingLevel). Models are selected by index, so the same id can appear
+    // more than once with different params.
+    const PROVIDERS = {
+        claude: {
+            label: 'Anthropic Claude',
+            keyPlaceholder: 'Enter your Anthropic API key (sk-ant-…)',
+            maxTokens: 64000,
+            models: [
+                { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+                { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+                { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+            ],
+            stream: streamClaude,
+        },
+        openai: {
+            label: 'OpenAI ChatGPT',
+            keyPlaceholder: 'Enter your OpenAI API key (sk-…)',
+            maxTokens: 64000,
+            models: [
+                { id: 'gpt-5.5', label: 'GPT-5.5' },
+                { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini' },
+                { id: 'gpt-5.4-nano', label: 'GPT-5.4 nano' },
+            ],
+            stream: streamOpenAI,
+        },
+        gemini: {
+            label: 'Google Gemini',
+            keyPlaceholder: 'Enter your Generative Language API key',
+            maxTokens: 65536,
+            models: [
+                { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro' },
+                { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+                // "Extended" = Flash at the deepest reasoning level (there is no
+                // separate "extended" model — it's the thinkingLevel setting).
+                { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Extended thinking)', thinkingLevel: 'HIGH' },
+                { id: 'gemini-3.1-flash', label: 'Gemini 3.1 Flash' },
+            ],
+            stream: streamGemini,
+        },
+    };
 
     // ── State ──
     // Each entry: { file: File, text: string|null, base64: string|null, mimeType: string|null }
@@ -32,8 +81,59 @@
     let isProcessing = false;
     let lastApiKey = '';
     let lastPrompt = '';
+    let lastProvider = 'claude';
+    let lastModel = PROVIDERS.claude.models[0]; // model descriptor object
+    // Remembers a key per provider so switching providers doesn't lose it
+    const apiKeys = {};
     // Stores raw result text keyed by filename
     const resultTexts = new Map();
+
+    // ================================================================
+    //  Provider / Model selectors
+    // ================================================================
+    function currentProvider() {
+        return providerSelect.value || 'claude';
+    }
+
+    function populateProviders() {
+        providerSelect.innerHTML = Object.entries(PROVIDERS)
+            .map(([id, p]) => `<option value="${id}">${escapeHtml(p.label)}</option>`)
+            .join('');
+        providerSelect.value = 'claude';
+    }
+
+    function populateModels() {
+        const provider = PROVIDERS[currentProvider()];
+        // value = index, so two entries can share a model id with different params
+        modelSelect.innerHTML = provider.models
+            .map((m, i) => `<option value="${i}">${escapeHtml(m.label)}</option>`)
+            .join('');
+        modelSelect.value = '0';
+    }
+
+    function currentModel() {
+        const models = PROVIDERS[currentProvider()].models;
+        return models[Number(modelSelect.value)] || models[0];
+    }
+
+    function syncProviderUI() {
+        const provider = PROVIDERS[currentProvider()];
+        apiKeyInput.placeholder = provider.keyPlaceholder;
+        apiKeyInput.value = apiKeys[currentProvider()] || '';
+    }
+
+    providerSelect.addEventListener('change', () => {
+        populateModels();
+        syncProviderUI();
+    });
+    modelSelect.addEventListener('change', () => { /* selection read at process time */ });
+    apiKeyInput.addEventListener('input', () => {
+        apiKeys[currentProvider()] = apiKeyInput.value;
+    });
+
+    populateProviders();
+    populateModels();
+    syncProviderUI();
 
     // ================================================================
     //  API Key Toggle
@@ -168,19 +268,22 @@
         if (isProcessing) return;
         // Validate
         const apiKey = apiKeyInput.value.trim();
-        if (!apiKey) { showToast('Please enter your API key.', 'error'); apiKeyInput.focus(); return; }
+        const providerLabel = PROVIDERS[currentProvider()].label;
+        if (!apiKey) { showToast(`Please enter your ${providerLabel} API key.`, 'error'); apiKeyInput.focus(); return; }
         if (!uploadedFiles.length) { showToast('Please upload at least one file.', 'error'); return; }
         const prompt = promptText.value.trim();
         if (!prompt) { showToast('Please enter a prompt.', 'error'); promptText.focus(); return; }
 
-        startProcessing(apiKey, prompt);
+        startProcessing(apiKey, prompt, currentProvider(), currentModel());
     });
 
-    async function startProcessing(apiKey, prompt) {
+    async function startProcessing(apiKey, prompt, provider, model) {
         isProcessing = true;
         processBtn.disabled = true;
         lastApiKey = apiKey;
         lastPrompt = prompt;
+        lastProvider = provider;
+        lastModel = model;
         processBtn.innerHTML = `
             <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
             Processing…`;
@@ -217,7 +320,9 @@
                     setCardStatus(cards[i], 'processing');
                     updateStats();
                     try {
-                        const result = await callGemini(apiKey, prompt, item);
+                        const pre = beginCardStream(cards[i]);
+                        const result = await streamModel(provider, model, apiKey, prompt, item,
+                            (_, full) => { pre.textContent = full; pre.scrollTop = pre.scrollHeight; });
                         resultTexts.set(item.file.name, result);
                         setCardResult(cards[i], result);
                         setCardStatus(cards[i], 'done');
@@ -335,75 +440,166 @@
     }
 
     // ================================================================
-    //  Gemini API
+    //  Model dispatch (streaming)
     // ================================================================
-    async function callGemini(apiKey, prompt, fileItem) {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${encodeURIComponent(apiKey)}`;
+    // streamModel(provider, modelObj, apiKey, prompt, fileItem, onDelta) → final text.
+    // onDelta(deltaText, fullText) is called as tokens arrive.
+    function streamModel(provider, model, apiKey, prompt, fileItem, onDelta) {
+        const cfg = PROVIDERS[provider];
+        if (!cfg) throw new Error(`Unknown provider: ${provider}`);
+        return cfg.stream(apiKey, model, prompt, fileItem, cfg.maxTokens, onDelta);
+    }
 
-        // Build parts array: prompt text + file content
-        const parts = [
-            { text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` }
-        ];
+    // Shared SSE consumer. Retries the *connection* on rate limits (429) and
+    // transient server errors (500/502/503/529) with exponential backoff
+    // (honoring Retry-After) — once bytes start streaming there is no retry.
+    // All three providers report errors as { error: { message } }, so error
+    // extraction is shared. `extractDelta(json)` returns the incremental text
+    // for one SSE chunk (or '' / undefined). Returns the accumulated text.
+    async function consumeSSE(url, options, extractDelta, onDelta, providerName) {
+        const MAX_ATTEMPTS = 4;
+        const RETRYABLE = new Set([429, 500, 502, 503, 529]);
+        let resp, lastErr;
 
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            resp = await fetch(url, options);
+            if (resp.ok) break;
+
+            const errData = await resp.json().catch(() => ({}));
+            const msg = errData?.error?.message
+                || (typeof errData?.error === 'string' ? errData.error : null)
+                || `HTTP ${resp.status}`;
+            lastErr = new Error(msg);
+            if (!RETRYABLE.has(resp.status) || attempt === MAX_ATTEMPTS - 1) throw lastErr;
+
+            const retryAfter = parseFloat(resp.headers.get('Retry-After'));
+            const waitMs = Number.isFinite(retryAfter) ? retryAfter * 1000 : 1000 * Math.pow(2, attempt);
+            await new Promise(r => setTimeout(r, waitMs));
+            resp = null;
+        }
+        if (!resp || !resp.ok) throw lastErr || new Error('Request failed');
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let full = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep the last (possibly incomplete) line
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith('data:')) continue;
+                const payload = trimmed.slice(5).trim();
+                if (!payload || payload === '[DONE]') continue;
+                let json;
+                try { json = JSON.parse(payload); } catch { continue; }
+                // A mid-stream error event surfaces here for every provider.
+                if (json.error) throw new Error(json.error.message || 'Stream error');
+                const delta = extractDelta(json) || '';
+                if (delta) { full += delta; onDelta(delta, full); }
+            }
+        }
+
+        if (!full) throw new Error(`Empty response from ${providerName}`);
+        return full;
+    }
+
+    // ── Anthropic Claude — POST /v1/messages (stream) ──
+    async function streamClaude(apiKey, model, prompt, fileItem, maxTokens, onDelta) {
+        const content = [{ type: 'text', text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` }];
         if (fileItem.base64) {
-            // PDF or binary file → send as inline data
-            parts.push({
-                inlineData: {
-                    mimeType: fileItem.mimeType,
-                    data: fileItem.base64
-                }
+            content.push({
+                type: 'document',
+                source: { type: 'base64', media_type: fileItem.mimeType, data: fileItem.base64 }
             });
         } else {
-            // Text file → append as text
+            content[0].text += `\n\n${fileItem.text}`;
+        }
+
+        return consumeSSE('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+                // Required for direct browser (CORS) calls
+                'anthropic-dangerous-direct-browser-access': 'true'
+            },
+            body: JSON.stringify({
+                model: model.id,
+                max_tokens: maxTokens,
+                stream: true,
+                messages: [{ role: 'user', content }]
+            })
+        }, (json) => {
+            // Text arrives as content_block_delta events with a text_delta
+            if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta') {
+                return json.delta.text;
+            }
+            return '';
+        }, onDelta, 'Claude');
+    }
+
+    // ── OpenAI ChatGPT — POST /v1/chat/completions (stream) ──
+    async function streamOpenAI(apiKey, model, prompt, fileItem, maxTokens, onDelta) {
+        let content;
+        if (fileItem.base64) {
+            content = [
+                { type: 'text', text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` },
+                {
+                    type: 'file',
+                    file: {
+                        filename: fileItem.file.name,
+                        file_data: `data:${fileItem.mimeType};base64,${fileItem.base64}`
+                    }
+                }
+            ];
+        } else {
+            content = `${prompt}\n\n--- FILE: ${fileItem.file.name} ---\n\n${fileItem.text}`;
+        }
+
+        return consumeSSE('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+                model: model.id,
+                // GPT-5.x are reasoning models → max_completion_tokens (not max_tokens)
+                max_completion_tokens: maxTokens,
+                stream: true,
+                messages: [{ role: 'user', content }]
+            })
+        }, (json) => json.choices?.[0]?.delta?.content || '', onDelta, 'OpenAI');
+    }
+
+    // ── Google Gemini — streamGenerateContent (SSE) ──
+    async function streamGemini(apiKey, model, prompt, fileItem, maxTokens, onDelta) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+
+        const parts = [{ text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` }];
+        if (fileItem.base64) {
+            parts.push({ inlineData: { mimeType: fileItem.mimeType, data: fileItem.base64 } });
+        } else {
             parts[0].text += `\n\n${fileItem.text}`;
         }
 
-        const body = {
-            contents: [{ parts }],
-            generationConfig: {
-                temperature: 0.7,
-                maxOutputTokens: 65536
-            }
-        };
-
-        // Retry on rate limits (429) and transient server errors (500/503)
-        // with exponential backoff, honoring Retry-After when present.
-        const MAX_ATTEMPTS = 4;
-        const RETRYABLE = new Set([429, 500, 503]);
-        let lastErr;
-
-        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-            const resp = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-
-            if (resp.ok) {
-                const data = await resp.json();
-                const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (!text) throw new Error('Empty response from Gemini');
-                return text;
-            }
-
-            const errData = await resp.json().catch(() => ({}));
-            const msg = errData?.error?.message || `HTTP ${resp.status}`;
-            lastErr = new Error(msg);
-
-            // Non-retryable, or out of attempts → fail now.
-            if (!RETRYABLE.has(resp.status) || attempt === MAX_ATTEMPTS - 1) {
-                throw lastErr;
-            }
-
-            // Backoff: Retry-After header if given, else exponential (1s, 2s, 4s).
-            const retryAfter = parseFloat(resp.headers.get('Retry-After'));
-            const waitMs = Number.isFinite(retryAfter)
-                ? retryAfter * 1000
-                : 1000 * Math.pow(2, attempt);
-            await new Promise(r => setTimeout(r, waitMs));
+        const generationConfig = { temperature: 0.7, maxOutputTokens: maxTokens };
+        // "Extended thinking" model variant → deepest reasoning level
+        if (model.thinkingLevel) {
+            generationConfig.thinkingConfig = { thinkingLevel: model.thinkingLevel };
         }
 
-        throw lastErr || new Error('Request failed');
+        return consumeSSE(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts }], generationConfig })
+        }, (json) => json.candidates?.[0]?.content?.parts?.[0]?.text || '', onDelta, 'Gemini');
     }
 
     // ================================================================
@@ -523,15 +719,21 @@
         retryBtn.disabled = false;
     }
 
+    // Swap a card's body to a live-updating <pre> for streaming output
+    function beginCardStream(card) {
+        const body = card.querySelector('.card-body');
+        body.innerHTML = '<pre class="streaming-text"></pre>';
+        return body.querySelector('.streaming-text');
+    }
+
     async function retryCard(card, fileItem) {
         if (!lastApiKey) { showToast('No API key available for retry.', 'error'); return; }
         setCardStatus(card, 'processing');
-        // Reset body to shimmer
-        const body = card.querySelector('.card-body');
-        body.innerHTML = `<div class="placeholder shimmer"><div class="shimmer-line"></div><div class="shimmer-line"></div><div class="shimmer-line"></div></div>`;
+        const pre = beginCardStream(card);
         updateStats();
         try {
-            const result = await callGemini(lastApiKey, lastPrompt, fileItem);
+            const result = await streamModel(lastProvider, lastModel, lastApiKey, lastPrompt, fileItem,
+                (_, full) => { pre.textContent = full; pre.scrollTop = pre.scrollHeight; });
             resultTexts.set(fileItem.file.name, result);
             setCardResult(card, result);
             setCardStatus(card, 'done');
