@@ -691,11 +691,10 @@
             return new Promise((resolve) => {
                 setTimeout(async () => {
                     setCardStatus(cards[i], 'processing');
+                    setCardProcessing(cards[i]);
                     updateStats();
                     try {
-                        const pre = beginCardStream(cards[i]);
-                        const result = await streamModel(provider, model, reasoningEffort, apiKey, prompt, item,
-                            (_, full) => { pre.textContent = full; pre.scrollTop = pre.scrollHeight; });
+                        const result = await streamModel(provider, model, reasoningEffort, apiKey, prompt, item);
                         resultTexts.set(item.file.name, result);
                         setCardResult(cards[i], result);
                         setCardStatus(cards[i], 'done');
@@ -818,12 +817,13 @@
     // ================================================================
     //  Model dispatch (streaming)
     // ================================================================
-    // streamModel(provider, modelObj, reasoningEffort, apiKey, prompt, fileItem, onDelta) → final text.
-    // onDelta(deltaText, fullText) is called as tokens arrive.
-    function streamModel(provider, model, reasoningEffort, apiKey, prompt, fileItem, onDelta) {
+    // Keep the HTTP response streamed to avoid timeouts, but only update the DOM
+    // after a response is complete. Per-token rendering is prohibitively costly
+    // when many generations run in parallel.
+    function streamModel(provider, model, reasoningEffort, apiKey, prompt, fileItem) {
         const cfg = PROVIDERS[provider];
         if (!cfg) throw new Error(`Unknown provider: ${provider}`);
-        return cfg.stream(apiKey, model, prompt, fileItem, cfg.maxTokens, onDelta, reasoningEffort);
+        return cfg.stream(apiKey, model, prompt, fileItem, cfg.maxTokens, reasoningEffort);
     }
 
     // Shared SSE consumer. Retries the *connection* on rate limits (429) and
@@ -832,7 +832,7 @@
     // All three providers report errors as { error: { message } }, so error
     // extraction is shared. `extractDelta(json)` returns the incremental text
     // for one SSE chunk (or '' / undefined). Returns the accumulated text.
-    async function consumeSSE(url, options, extractDelta, onDelta, providerName) {
+    async function consumeSSE(url, options, extractDelta, providerName) {
         const MAX_ATTEMPTS = 4;
         const RETRYABLE = new Set([429, 500, 502, 503, 529]);
         let resp, lastErr;
@@ -858,7 +858,7 @@
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let full = '';
+        const chunks = [];
 
         while (true) {
             const { done, value } = await reader.read();
@@ -876,16 +876,17 @@
                 // A mid-stream error event surfaces here for every provider.
                 if (json.error) throw new Error(json.error.message || 'Stream error');
                 const delta = extractDelta(json) || '';
-                if (delta) { full += delta; onDelta(delta, full); }
+                if (delta) chunks.push(delta);
             }
         }
 
+        const full = chunks.join('');
         if (!full) throw new Error(`Empty response from ${providerName}`);
         return full;
     }
 
     // ── Anthropic Claude — POST /v1/messages (stream) ──
-    async function streamClaude(apiKey, model, prompt, fileItem, maxTokens, onDelta, reasoningEffort) {
+    async function streamClaude(apiKey, model, prompt, fileItem, maxTokens, reasoningEffort) {
         const content = [{ type: 'text', text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` }];
         if (fileItem.base64) {
             content.push({
@@ -922,11 +923,11 @@
                 return json.delta.text;
             }
             return '';
-        }, onDelta, 'Claude');
+        }, 'Claude');
     }
 
     // ── OpenAI ChatGPT — POST /v1/chat/completions (stream) ──
-    async function streamOpenAI(apiKey, model, prompt, fileItem, maxTokens, onDelta, reasoningEffort) {
+    async function streamOpenAI(apiKey, model, prompt, fileItem, maxTokens, reasoningEffort) {
         let content;
         if (fileItem.base64) {
             content = [
@@ -961,11 +962,11 @@
                 'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify(requestBody)
-        }, (json) => json.choices?.[0]?.delta?.content || '', onDelta, 'OpenAI');
+        }, (json) => json.choices?.[0]?.delta?.content || '', 'OpenAI');
     }
 
     // ── Google Gemini — streamGenerateContent (SSE) ──
-    async function streamGemini(apiKey, model, prompt, fileItem, maxTokens, onDelta) {
+    async function streamGemini(apiKey, model, prompt, fileItem, maxTokens) {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
 
         const parts = [{ text: `${prompt}\n\n--- FILE: ${fileItem.file.name} ---` }];
@@ -985,7 +986,7 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contents: [{ parts }], generationConfig })
-        }, (json) => json.candidates?.[0]?.content?.parts?.[0]?.text || '', onDelta, 'Gemini');
+        }, (json) => json.candidates?.[0]?.content?.parts?.[0]?.text || '', 'Gemini');
     }
 
     // ================================================================
@@ -1027,11 +1028,7 @@
                 </div>
             </div>
             <div class="card-body">
-                <div class="placeholder shimmer">
-                    <div class="shimmer-line"></div>
-                    <div class="shimmer-line"></div>
-                    <div class="shimmer-line"></div>
-                </div>
+                <div class="placeholder">Waiting to start…</div>
             </div>`;
 
         // Store mapping
@@ -1102,21 +1099,18 @@
         retryBtn.disabled = false;
     }
 
-    // Swap a card's body to a live-updating <pre> for streaming output
-    function beginCardStream(card) {
+    function setCardProcessing(card) {
         const body = card.querySelector('.card-body');
-        body.innerHTML = '<pre class="streaming-text"></pre>';
-        return body.querySelector('.streaming-text');
+        body.innerHTML = '<div class="placeholder">Generating response…</div>';
     }
 
     async function retryCard(card, fileItem) {
         if (!lastApiKey) { showToast('No API key available for retry.', 'error'); return; }
         setCardStatus(card, 'processing');
-        const pre = beginCardStream(card);
+        setCardProcessing(card);
         updateStats();
         try {
-            const result = await streamModel(lastProvider, lastModel, lastReasoningEffort, lastApiKey, lastPrompt, fileItem,
-                (_, full) => { pre.textContent = full; pre.scrollTop = pre.scrollHeight; });
+            const result = await streamModel(lastProvider, lastModel, lastReasoningEffort, lastApiKey, lastPrompt, fileItem);
             resultTexts.set(fileItem.file.name, result);
             setCardResult(card, result);
             setCardStatus(card, 'done');

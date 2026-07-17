@@ -565,7 +565,7 @@ body::before {
     transform: translateY(-1px);
 }
 
-.btn-primary:active {
+.btn-primary:active:not(:disabled) {
     transform: translateY(0) scale(0.96);
 }
 
@@ -743,6 +743,8 @@ body::before {
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     overflow: hidden;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 260px;
     animation: cardIn 0.5s cubic-bezier(0.4, 0, 0.2, 1) both;
     transition: border-color var(--transition), box-shadow var(--transition);
 }
@@ -793,7 +795,6 @@ body::before {
 
 .card-title .status-dot.processing {
     background: var(--yellow);
-    animation: pulse 1.5s infinite;
 }
 
 .card-title .status-dot.done {
@@ -854,24 +855,6 @@ body::before {
     font-style: italic;
 }
 
-/* Shimmer loading */
-.shimmer {
-    background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.04) 50%, transparent 100%);
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-}
-
-.shimmer-line {
-    height: 14px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.06);
-    margin-bottom: 10px;
-}
-
-.shimmer-line:last-child {
-    width: 60%;
-}
-
 /* Result content (rendered markdown) */
 .result-content {
     font-size: 0.84rem;
@@ -923,30 +906,6 @@ body::before {
 .result-content pre code {
     background: none;
     padding: 0;
-}
-
-/* Live streaming output (shown while tokens arrive, before final markdown render) */
-.streaming-text {
-    margin: 0;
-    max-height: 360px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--font-mono);
-    font-size: 0.82rem;
-    line-height: 1.55;
-    color: var(--text-secondary);
-}
-
-/* Blinking cursor at the end of streaming text */
-.streaming-text::after {
-    content: '▋';
-    color: var(--accent-light);
-    animation: blink 1s steps(2, start) infinite;
-}
-
-@keyframes blink {
-    to { visibility: hidden; }
 }
 
 .result-content ul,
@@ -1158,16 +1117,6 @@ body::before {
 
     50% {
         opacity: 0.4;
-    }
-}
-
-@keyframes shimmer {
-    0% {
-        background-position: 200% 0;
-    }
-
-    100% {
-        background-position: -200% 0;
     }
 }
 
