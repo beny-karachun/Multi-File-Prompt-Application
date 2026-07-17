@@ -112,8 +112,15 @@
     // Map result cards to their source files for retry/download
     const cardFileMap = new WeakMap();
 
-    // ── Local persistence ──
+    // ── Browser persistence ──
+    // Small settings stay in localStorage for fast synchronous restoration.
+    // Files and generated results live in IndexedDB, which has a much larger
+    // quota and stores File/Blob objects without base64 expansion.
     const STORAGE_KEY = 'multiFilePromptApp.state.v1';
+    const DATABASE_NAME = 'multiFilePromptApp';
+    const DATABASE_VERSION = 1;
+    const FILE_STORE = 'files';
+    const RESULT_STORE = 'results';
     const DEFAULT_PROVIDER = 'claude';
     const DEFAULT_STAGGER_DELAY = '2';
     let saveTimer = null;
@@ -121,6 +128,8 @@
     let isRestoring = false;
     let hasShownStorageWarning = false;
     let shouldPersistState = false;
+    let databasePromise = null;
+    let databaseWriteChain = Promise.resolve();
 
     function scheduleStateSave() {
         if (isRestoring) return;
@@ -133,42 +142,12 @@
         }, 250);
     }
 
-    async function persistState(revision) {
-        try {
-            const files = await Promise.all(uploadedFiles.map(serializeFileItem));
-            if (revision !== saveRevision || isRestoring) return;
-            writeSavedState(buildSavedState(files));
-        } catch (error) {
-            showStorageWarning('Some uploaded files could not be saved locally. Your other settings are still saved.');
-            if (revision === saveRevision && !isRestoring) {
-                writeSavedState(buildSavedState([]));
-            }
-        }
+    function persistState(revision) {
+        if (revision !== saveRevision || isRestoring) return;
+        writeSavedState(buildSavedState());
     }
 
-    function serializeFileItem(item) {
-        if (!item.storedDataUrl) {
-            item.storedDataUrlPromise ||= readFileAsDataUrl(item.file).then((dataUrl) => {
-                item.storedDataUrl = dataUrl;
-                return dataUrl;
-            }).finally(() => {
-                item.storedDataUrlPromise = null;
-            });
-        }
-
-        return (item.storedDataUrl
-            ? Promise.resolve(item.storedDataUrl)
-            : item.storedDataUrlPromise
-        ).then(dataUrl => ({
-            name: item.file.name,
-            type: item.file.type,
-            lastModified: item.file.lastModified,
-            dataUrl,
-        }));
-    }
-
-    function buildSavedState(files) {
-        const savedFileNames = new Set(files.map(file => file.name));
+    function buildSavedState() {
         apiKeys[currentProvider()] = apiKeyInput.value;
 
         const lastModelIndex = PROVIDERS[lastProvider]
@@ -176,15 +155,14 @@
             : 0;
 
         return {
-            version: 1,
+            version: 2,
             provider: currentProvider(),
             modelIndex: Number(modelSelect.value) || 0,
             reasoningEffort: currentReasoningEffort(),
             apiKeys: { ...apiKeys },
             prompt: promptText.value,
             staggerDelay: staggerDelay.value,
-            files,
-            results: [...resultTexts.entries()].filter(([fileName]) => savedFileNames.has(fileName)),
+            fileIds: uploadedFiles.map(item => item.id),
             lastRun: lastApiKey ? {
                 provider: lastProvider,
                 modelIndex: Math.max(0, lastModelIndex),
@@ -198,21 +176,8 @@
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         } catch (error) {
-            // localStorage is intentionally small. Preserve the form/settings if
-            // file contents or generated results exceed the browser's quota.
-            try {
-                localStorage.setItem(STORAGE_KEY, JSON.stringify({
-                    ...state,
-                    files: [],
-                    results: [],
-                }));
-                if (!silent) {
-                    showStorageWarning('The files are too large for local storage. Settings and prompt were saved, but files and results were not.');
-                }
-            } catch (fallbackError) {
-                if (!silent) {
-                    showStorageWarning('This browser could not save the page state locally.');
-                }
+            if (!silent) {
+                showStorageWarning('This browser could not save the page settings locally.');
             }
         }
     }
@@ -228,18 +193,150 @@
         clearTimeout(saveTimer);
         saveTimer = null;
         saveRevision++;
-        const files = uploadedFiles
-            .filter(item => item.storedDataUrl)
-            .map(item => ({
+        writeSavedState(buildSavedState(), true);
+    }
+
+    function createFileId() {
+        return crypto.randomUUID
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function openDatabase() {
+        if (databasePromise) return databasePromise;
+        if (!window.indexedDB) return Promise.reject(new Error('IndexedDB is unavailable'));
+
+        databasePromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+            request.onupgradeneeded = () => {
+                const database = request.result;
+                if (!database.objectStoreNames.contains(FILE_STORE)) {
+                    database.createObjectStore(FILE_STORE, { keyPath: 'id' });
+                }
+                if (!database.objectStoreNames.contains(RESULT_STORE)) {
+                    database.createObjectStore(RESULT_STORE, { keyPath: 'fileId' });
+                }
+            };
+            request.onsuccess = () => {
+                const database = request.result;
+                database.onversionchange = () => database.close();
+                resolve(database);
+            };
+            request.onerror = () => reject(request.error || new Error('Could not open IndexedDB'));
+            request.onblocked = () => reject(new Error('IndexedDB upgrade was blocked'));
+        }).catch((error) => {
+            databasePromise = null;
+            throw error;
+        });
+
+        return databasePromise;
+    }
+
+    async function runDatabaseWrite(storeNames, operation) {
+        const database = await openDatabase();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction(storeNames, 'readwrite');
+            const stores = Object.fromEntries(
+                storeNames.map(name => [name, transaction.objectStore(name)])
+            );
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error || new Error('IndexedDB write failed'));
+            transaction.onabort = () => reject(transaction.error || new Error('IndexedDB write was aborted'));
+            try {
+                operation(stores);
+            } catch (error) {
+                transaction.abort();
+                reject(error);
+            }
+        });
+    }
+
+    function enqueueDatabaseWrite(operation, warningMessage = 'Files or results could not be saved in IndexedDB.') {
+        const write = databaseWriteChain.then(operation);
+        databaseWriteChain = write.catch(() => {});
+        if (warningMessage) write.catch(() => showStorageWarning(warningMessage));
+        return write;
+    }
+
+    function persistFileItems(items) {
+        if (!items.length) return Promise.resolve();
+        return enqueueDatabaseWrite(() => runDatabaseWrite([FILE_STORE], stores => {
+            items.forEach(item => stores[FILE_STORE].put({
+                id: item.id,
                 name: item.file.name,
                 type: item.file.type,
                 lastModified: item.file.lastModified,
-                dataUrl: item.storedDataUrl,
+                blob: item.file,
             }));
-        writeSavedState(buildSavedState(files), true);
+        }), 'One or more uploaded files could not be saved in IndexedDB.');
     }
 
-    function restoreSavedState() {
+    function deletePersistedFile(fileId) {
+        return enqueueDatabaseWrite(() => runDatabaseWrite([FILE_STORE, RESULT_STORE], stores => {
+            stores[FILE_STORE].delete(fileId);
+            stores[RESULT_STORE].delete(fileId);
+        }));
+    }
+
+    function persistResult(fileItem, text) {
+        return enqueueDatabaseWrite(() => runDatabaseWrite([RESULT_STORE], stores => {
+            stores[RESULT_STORE].put({ fileId: fileItem.id, text });
+        }), 'A generated result could not be saved in IndexedDB.');
+    }
+
+    function clearPersistedResults() {
+        return enqueueDatabaseWrite(() => runDatabaseWrite([RESULT_STORE], stores => {
+            stores[RESULT_STORE].clear();
+        }));
+    }
+
+    function clearPersistedDatabase() {
+        return enqueueDatabaseWrite(() => runDatabaseWrite([FILE_STORE, RESULT_STORE], stores => {
+            stores[FILE_STORE].clear();
+            stores[RESULT_STORE].clear();
+        }), null);
+    }
+
+    function replacePersistedDatabase(items) {
+        return enqueueDatabaseWrite(() => runDatabaseWrite([FILE_STORE, RESULT_STORE], stores => {
+            stores[FILE_STORE].clear();
+            stores[RESULT_STORE].clear();
+            items.forEach(item => {
+                stores[FILE_STORE].put({
+                    id: item.id,
+                    name: item.file.name,
+                    type: item.file.type,
+                    lastModified: item.file.lastModified,
+                    blob: item.file,
+                });
+                const result = resultTexts.get(item.file.name);
+                if (typeof result === 'string') {
+                    stores[RESULT_STORE].put({ fileId: item.id, text: result });
+                }
+            });
+        }), null);
+    }
+
+    async function readDatabaseRecords(storeName, ids) {
+        if (!ids.length) return new Map();
+        const database = await openDatabase();
+        return new Promise((resolve, reject) => {
+            const transaction = database.transaction([storeName], 'readonly');
+            const store = transaction.objectStore(storeName);
+            const records = new Map();
+            ids.forEach(id => {
+                const request = store.get(id);
+                request.onsuccess = () => {
+                    if (request.result) records.set(id, request.result);
+                };
+            });
+            transaction.oncomplete = () => resolve(records);
+            transaction.onerror = () => reject(transaction.error || new Error('IndexedDB read failed'));
+            transaction.onabort = () => reject(transaction.error || new Error('IndexedDB read was aborted'));
+        });
+    }
+
+    async function restoreSavedState() {
         let saved;
         try {
             const raw = localStorage.getItem(STORAGE_KEY);
@@ -249,7 +346,7 @@
             try { localStorage.removeItem(STORAGE_KEY); } catch (storageError) { /* no-op */ }
             return;
         }
-        if (!saved || saved.version !== 1) return;
+        if (!saved || ![1, 2].includes(saved.version)) return;
 
         shouldPersistState = true;
         isRestoring = true;
@@ -280,41 +377,88 @@
                 ? String(Math.min(30, Math.max(0, savedDelay)))
                 : DEFAULT_STAGGER_DELAY;
 
-            uploadedFiles = Array.isArray(saved.files)
-                ? saved.files.map(deserializeFileItem).filter(Boolean)
-                : [];
             resultTexts.clear();
-            const availableFiles = new Set(uploadedFiles.map(item => item.file.name));
-            if (Array.isArray(saved.results)) {
-                saved.results.forEach((entry) => {
-                    if (Array.isArray(entry) && entry.length === 2
-                        && availableFiles.has(entry[0]) && typeof entry[1] === 'string') {
-                        resultTexts.set(entry[0], entry[1]);
-                    }
+
+            if (saved.version === 2) {
+                const fileIds = Array.isArray(saved.fileIds)
+                    ? saved.fileIds.filter(id => typeof id === 'string')
+                    : [];
+                const [fileRecords, resultRecords] = await Promise.all([
+                    readDatabaseRecords(FILE_STORE, fileIds),
+                    readDatabaseRecords(RESULT_STORE, fileIds),
+                ]);
+                uploadedFiles = fileIds
+                    .map(id => databaseRecordToFileItem(fileRecords.get(id)))
+                    .filter(Boolean);
+                uploadedFiles.forEach(item => {
+                    const result = resultRecords.get(item.id)?.text;
+                    if (typeof result === 'string') resultTexts.set(item.file.name, result);
                 });
+            } else {
+                // Migrate existing v1 localStorage saves into IndexedDB once.
+                uploadedFiles = Array.isArray(saved.files)
+                    ? saved.files.map(deserializeLegacyFileItem).filter(Boolean)
+                    : [];
+                const availableFiles = new Set(uploadedFiles.map(item => item.file.name));
+                if (Array.isArray(saved.results)) {
+                    saved.results.forEach((entry) => {
+                        if (Array.isArray(entry) && entry.length === 2
+                            && availableFiles.has(entry[0]) && typeof entry[1] === 'string') {
+                            resultTexts.set(entry[0], entry[1]);
+                        }
+                    });
+                }
             }
 
             restoreLastRun(saved.lastRun);
             renderFileList();
             restoreResults();
+            if (saved.version === 1) {
+                try {
+                    await replacePersistedDatabase(uploadedFiles);
+                    writeSavedState(buildSavedState());
+                } catch (error) {
+                    showStorageWarning('The previous local save could not be migrated to IndexedDB.');
+                }
+            }
+        } catch (error) {
+            uploadedFiles = [];
+            resultTexts.clear();
+            renderFileList();
+            restoreResults();
+            showStorageWarning('Files and results could not be restored from IndexedDB.');
         } finally {
             isRestoring = false;
         }
     }
 
-    function deserializeFileItem(savedFile) {
+    function databaseRecordToFileItem(record) {
+        if (!record || typeof record.id !== 'string' || !(record.blob instanceof Blob)) return null;
+        const file = new File([record.blob], record.name || 'saved-file', {
+            type: record.type || record.blob.type,
+            lastModified: Number(record.lastModified) || Date.now(),
+        });
+        return {
+            id: record.id,
+            file,
+            text: null,
+            base64: null,
+            mimeType: null,
+        };
+    }
+
+    function deserializeLegacyFileItem(savedFile) {
         try {
             if (!savedFile || typeof savedFile.name !== 'string' || typeof savedFile.dataUrl !== 'string') {
                 return null;
             }
             const file = dataUrlToFile(savedFile.dataUrl, savedFile);
             return {
+                id: createFileId(),
                 file,
                 text: null,
                 base64: null,
                 mimeType: null,
-                storedDataUrl: savedFile.dataUrl,
-                storedDataUrlPromise: null,
             };
         } catch (error) {
             return null;
@@ -375,6 +519,7 @@
         } catch (error) {
             // The in-memory page can still be reset if storage is unavailable.
         }
+        const databaseClear = clearPersistedDatabase();
 
         uploadedFiles = [];
         resultTexts.clear();
@@ -404,7 +549,9 @@
         hasShownStorageWarning = false;
         shouldPersistState = false;
         isRestoring = false;
-        showToast('Page reset and saved data deleted.', 'success');
+        databaseClear
+            .then(() => showToast('Page reset and saved data deleted.', 'success'))
+            .catch(() => showToast('Page reset, but IndexedDB could not be fully cleared.', 'error'));
     }
 
     // ================================================================
@@ -573,24 +720,28 @@
     }
 
     function addFiles(fileListObj) {
+        const addedItems = [];
         for (const file of fileListObj) {
             // Avoid duplicates by name + size
             if (uploadedFiles.some(f => f.file.name === file.name && f.file.size === file.size)) continue;
-            uploadedFiles.push({
+            const item = {
+                id: createFileId(),
                 file,
                 text: null,
                 base64: null,
                 mimeType: null,
-                storedDataUrl: null,
-                storedDataUrlPromise: null,
-            });
+            };
+            uploadedFiles.push(item);
+            addedItems.push(item);
         }
         renderFileList();
+        persistFileItems(addedItems);
         scheduleStateSave();
     }
 
     function removeFile(index) {
-        uploadedFiles.splice(index, 1);
+        const [removedItem] = uploadedFiles.splice(index, 1);
+        if (removedItem) deletePersistedFile(removedItem.id);
         renderFileList();
         scheduleStateSave();
     }
@@ -682,6 +833,7 @@
         resultsSection.classList.add('visible');
         resultsGrid.innerHTML = '';
         resultTexts.clear();
+        clearPersistedResults();
         const cards = uploadedFiles.map((item, i) => createResultCard(item, i));
         updateStats();
 
@@ -696,6 +848,7 @@
                     try {
                         const result = await streamModel(provider, model, reasoningEffort, apiKey, prompt, item);
                         resultTexts.set(item.file.name, result);
+                        persistResult(item, result);
                         setCardResult(cards[i], result);
                         setCardStatus(cards[i], 'done');
                         scheduleStateSave();
@@ -1112,6 +1265,7 @@
         try {
             const result = await streamModel(lastProvider, lastModel, lastReasoningEffort, lastApiKey, lastPrompt, fileItem);
             resultTexts.set(fileItem.file.name, result);
+            persistResult(fileItem, result);
             setCardResult(card, result);
             setCardStatus(card, 'done');
             scheduleStateSave();
@@ -1173,15 +1327,6 @@
                 resolve(base64);
             };
             reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
-            reader.readAsDataURL(file);
-        });
-    }
-
-    function readFileAsDataUrl(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error(`Failed to save ${file.name}`));
             reader.readAsDataURL(file);
         });
     }
