@@ -185,6 +185,7 @@ body::before {
 .header-right {
     display: flex;
     align-items: center;
+    gap: 12px;
 }
 
 /* API Key */
@@ -501,7 +502,9 @@ body::before {
 .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
+    min-height: 40px;
     padding: 10px 20px;
     border-radius: var(--radius-sm);
     font-family: var(--font-sans);
@@ -509,7 +512,7 @@ body::before {
     font-weight: 600;
     cursor: pointer;
     border: none;
-    transition: all var(--transition);
+    transition: background-color var(--transition), border-color var(--transition), color var(--transition), box-shadow var(--transition), transform var(--transition), opacity var(--transition);
     white-space: nowrap;
 }
 
@@ -530,6 +533,27 @@ body::before {
     background: var(--accent-glow);
 }
 
+.btn:active:not(:disabled) {
+    transform: scale(0.96);
+}
+
+.btn-reset {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+}
+
+.btn-reset:hover {
+    border-color: rgba(239, 68, 68, 0.55);
+    background: var(--red-glow);
+    color: #f87171;
+}
+
+.btn-reset:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
 .btn-primary {
     background: linear-gradient(135deg, var(--accent), var(--purple));
     color: white;
@@ -542,7 +566,7 @@ body::before {
 }
 
 .btn-primary:active {
-    transform: translateY(0);
+    transform: translateY(0) scale(0.96);
 }
 
 .btn-primary:disabled {
@@ -1201,6 +1225,11 @@ body::before {
 
     .header-right {
         width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .api-key-group {
+        flex: 1 1 360px;
     }
 }
 

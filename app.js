@@ -28,6 +28,7 @@
     const providerSelect = $('#providerSelect');
     const modelSelect = $('#modelSelect');
     const reasoningSelect = $('#reasoningSelect');
+    const resetBtn = $('#resetBtn');
 
     // ================================================================
     //  Providers
@@ -108,6 +109,303 @@
     const apiKeys = {};
     // Stores raw result text keyed by filename
     const resultTexts = new Map();
+    // Map result cards to their source files for retry/download
+    const cardFileMap = new WeakMap();
+
+    // ── Local persistence ──
+    const STORAGE_KEY = 'multiFilePromptApp.state.v1';
+    const DEFAULT_PROVIDER = 'claude';
+    const DEFAULT_STAGGER_DELAY = '2';
+    let saveTimer = null;
+    let saveRevision = 0;
+    let isRestoring = false;
+    let hasShownStorageWarning = false;
+    let shouldPersistState = false;
+
+    function scheduleStateSave() {
+        if (isRestoring) return;
+        shouldPersistState = true;
+        clearTimeout(saveTimer);
+        const revision = ++saveRevision;
+        saveTimer = setTimeout(() => {
+            saveTimer = null;
+            persistState(revision);
+        }, 250);
+    }
+
+    async function persistState(revision) {
+        try {
+            const files = await Promise.all(uploadedFiles.map(serializeFileItem));
+            if (revision !== saveRevision || isRestoring) return;
+            writeSavedState(buildSavedState(files));
+        } catch (error) {
+            showStorageWarning('Some uploaded files could not be saved locally. Your other settings are still saved.');
+            if (revision === saveRevision && !isRestoring) {
+                writeSavedState(buildSavedState([]));
+            }
+        }
+    }
+
+    function serializeFileItem(item) {
+        if (!item.storedDataUrl) {
+            item.storedDataUrlPromise ||= readFileAsDataUrl(item.file).then((dataUrl) => {
+                item.storedDataUrl = dataUrl;
+                return dataUrl;
+            }).finally(() => {
+                item.storedDataUrlPromise = null;
+            });
+        }
+
+        return (item.storedDataUrl
+            ? Promise.resolve(item.storedDataUrl)
+            : item.storedDataUrlPromise
+        ).then(dataUrl => ({
+            name: item.file.name,
+            type: item.file.type,
+            lastModified: item.file.lastModified,
+            dataUrl,
+        }));
+    }
+
+    function buildSavedState(files) {
+        const savedFileNames = new Set(files.map(file => file.name));
+        apiKeys[currentProvider()] = apiKeyInput.value;
+
+        const lastModelIndex = PROVIDERS[lastProvider]
+            ? PROVIDERS[lastProvider].models.indexOf(lastModel)
+            : 0;
+
+        return {
+            version: 1,
+            provider: currentProvider(),
+            modelIndex: Number(modelSelect.value) || 0,
+            reasoningEffort: currentReasoningEffort(),
+            apiKeys: { ...apiKeys },
+            prompt: promptText.value,
+            staggerDelay: staggerDelay.value,
+            files,
+            results: [...resultTexts.entries()].filter(([fileName]) => savedFileNames.has(fileName)),
+            lastRun: lastApiKey ? {
+                provider: lastProvider,
+                modelIndex: Math.max(0, lastModelIndex),
+                reasoningEffort: lastReasoningEffort,
+                prompt: lastPrompt,
+            } : null,
+        };
+    }
+
+    function writeSavedState(state, silent = false) {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        } catch (error) {
+            // localStorage is intentionally small. Preserve the form/settings if
+            // file contents or generated results exceed the browser's quota.
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                    ...state,
+                    files: [],
+                    results: [],
+                }));
+                if (!silent) {
+                    showStorageWarning('The files are too large for local storage. Settings and prompt were saved, but files and results were not.');
+                }
+            } catch (fallbackError) {
+                if (!silent) {
+                    showStorageWarning('This browser could not save the page state locally.');
+                }
+            }
+        }
+    }
+
+    function showStorageWarning(message) {
+        if (hasShownStorageWarning) return;
+        hasShownStorageWarning = true;
+        showToast(message, 'error');
+    }
+
+    function persistCachedState() {
+        if (isRestoring || !shouldPersistState) return;
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        saveRevision++;
+        const files = uploadedFiles
+            .filter(item => item.storedDataUrl)
+            .map(item => ({
+                name: item.file.name,
+                type: item.file.type,
+                lastModified: item.file.lastModified,
+                dataUrl: item.storedDataUrl,
+            }));
+        writeSavedState(buildSavedState(files), true);
+    }
+
+    function restoreSavedState() {
+        let saved;
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return;
+            saved = JSON.parse(raw);
+        } catch (error) {
+            try { localStorage.removeItem(STORAGE_KEY); } catch (storageError) { /* no-op */ }
+            return;
+        }
+        if (!saved || saved.version !== 1) return;
+
+        shouldPersistState = true;
+        isRestoring = true;
+        try {
+            Object.keys(apiKeys).forEach(provider => delete apiKeys[provider]);
+            if (saved.apiKeys && typeof saved.apiKeys === 'object') {
+                Object.entries(saved.apiKeys).forEach(([provider, key]) => {
+                    if (PROVIDERS[provider] && typeof key === 'string') apiKeys[provider] = key;
+                });
+            }
+
+            providerSelect.value = PROVIDERS[saved.provider] ? saved.provider : DEFAULT_PROVIDER;
+            populateModels();
+            const modelIndex = Number(saved.modelIndex);
+            if (Number.isInteger(modelIndex) && PROVIDERS[currentProvider()].models[modelIndex]) {
+                modelSelect.value = String(modelIndex);
+            }
+            populateReasoningEfforts();
+            if (!reasoningSelect.disabled
+                && [...reasoningSelect.options].some(option => option.value === saved.reasoningEffort)) {
+                reasoningSelect.value = saved.reasoningEffort;
+            }
+            syncProviderUI();
+
+            promptText.value = typeof saved.prompt === 'string' ? saved.prompt : '';
+            const savedDelay = Number(saved.staggerDelay);
+            staggerDelay.value = Number.isFinite(savedDelay)
+                ? String(Math.min(30, Math.max(0, savedDelay)))
+                : DEFAULT_STAGGER_DELAY;
+
+            uploadedFiles = Array.isArray(saved.files)
+                ? saved.files.map(deserializeFileItem).filter(Boolean)
+                : [];
+            resultTexts.clear();
+            const availableFiles = new Set(uploadedFiles.map(item => item.file.name));
+            if (Array.isArray(saved.results)) {
+                saved.results.forEach((entry) => {
+                    if (Array.isArray(entry) && entry.length === 2
+                        && availableFiles.has(entry[0]) && typeof entry[1] === 'string') {
+                        resultTexts.set(entry[0], entry[1]);
+                    }
+                });
+            }
+
+            restoreLastRun(saved.lastRun);
+            renderFileList();
+            restoreResults();
+        } finally {
+            isRestoring = false;
+        }
+    }
+
+    function deserializeFileItem(savedFile) {
+        try {
+            if (!savedFile || typeof savedFile.name !== 'string' || typeof savedFile.dataUrl !== 'string') {
+                return null;
+            }
+            const file = dataUrlToFile(savedFile.dataUrl, savedFile);
+            return {
+                file,
+                text: null,
+                base64: null,
+                mimeType: null,
+                storedDataUrl: savedFile.dataUrl,
+                storedDataUrlPromise: null,
+            };
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function dataUrlToFile(dataUrl, metadata) {
+        const commaIndex = dataUrl.indexOf(',');
+        if (commaIndex < 0) throw new Error('Invalid saved file');
+        const header = dataUrl.slice(0, commaIndex);
+        const encoded = dataUrl.slice(commaIndex + 1);
+        const binary = header.includes(';base64') ? atob(encoded) : decodeURIComponent(encoded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const headerType = header.match(/^data:([^;,]*)/)?.[1] || '';
+        return new File([bytes], metadata.name, {
+            type: metadata.type || headerType,
+            lastModified: Number(metadata.lastModified) || Date.now(),
+        });
+    }
+
+    function restoreLastRun(savedLastRun) {
+        const provider = savedLastRun && PROVIDERS[savedLastRun.provider]
+            ? savedLastRun.provider
+            : currentProvider();
+        const models = PROVIDERS[provider].models;
+        const modelIndex = Number(savedLastRun?.modelIndex);
+        lastProvider = provider;
+        lastModel = Number.isInteger(modelIndex) && models[modelIndex] ? models[modelIndex] : models[0];
+        lastReasoningEffort = typeof savedLastRun?.reasoningEffort === 'string'
+            ? savedLastRun.reasoningEffort
+            : (lastModel.defaultEffort || null);
+        lastPrompt = typeof savedLastRun?.prompt === 'string' ? savedLastRun.prompt : promptText.value.trim();
+        lastApiKey = apiKeys[lastProvider] || '';
+    }
+
+    function restoreResults() {
+        resultsGrid.innerHTML = '';
+        const completedItems = uploadedFiles.filter(item => resultTexts.has(item.file.name));
+        resultsSection.classList.toggle('visible', completedItems.length > 0);
+        completedItems.forEach((item, index) => {
+            const card = createResultCard(item, index);
+            setCardResult(card, resultTexts.get(item.file.name));
+            setCardStatus(card, 'done');
+        });
+        updateStats();
+    }
+
+    function resetPage() {
+        if (isProcessing) return;
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        saveRevision++;
+        isRestoring = true;
+
+        try {
+            localStorage.removeItem(STORAGE_KEY);
+        } catch (error) {
+            // The in-memory page can still be reset if storage is unavailable.
+        }
+
+        uploadedFiles = [];
+        resultTexts.clear();
+        Object.keys(apiKeys).forEach(provider => delete apiKeys[provider]);
+        lastApiKey = '';
+        lastPrompt = '';
+        lastProvider = DEFAULT_PROVIDER;
+        lastModel = PROVIDERS[DEFAULT_PROVIDER].models[0];
+        lastReasoningEffort = lastModel.defaultEffort;
+
+        providerSelect.value = DEFAULT_PROVIDER;
+        populateModels();
+        syncProviderUI();
+        apiKeyInput.type = 'password';
+        toggleApiKeyBtn.querySelector('.eye-icon').style.display = '';
+        toggleApiKeyBtn.querySelector('.eye-off-icon').style.display = 'none';
+        promptText.value = '';
+        staggerDelay.value = DEFAULT_STAGGER_DELAY;
+        fileInput.value = '';
+        promptFileInput.value = '';
+        renderFileList();
+        resultsGrid.innerHTML = '';
+        resultsStats.innerHTML = '';
+        resultsSection.classList.remove('visible');
+        downloadMenu.classList.remove('open');
+        toastContainer.innerHTML = '';
+        hasShownStorageWarning = false;
+        shouldPersistState = false;
+        isRestoring = false;
+        showToast('Page reset and saved data deleted.', 'success');
+    }
 
     // ================================================================
     //  Provider / Model selectors
@@ -173,15 +471,26 @@
     providerSelect.addEventListener('change', () => {
         populateModels();
         syncProviderUI();
+        scheduleStateSave();
     });
-    modelSelect.addEventListener('change', populateReasoningEfforts);
+    modelSelect.addEventListener('change', () => {
+        populateReasoningEfforts();
+        scheduleStateSave();
+    });
+    reasoningSelect.addEventListener('change', scheduleStateSave);
     apiKeyInput.addEventListener('input', () => {
         apiKeys[currentProvider()] = apiKeyInput.value;
+        scheduleStateSave();
     });
+    promptText.addEventListener('input', scheduleStateSave);
+    staggerDelay.addEventListener('input', scheduleStateSave);
+    resetBtn.addEventListener('click', resetPage);
+    window.addEventListener('pagehide', persistCachedState);
 
     populateProviders();
     populateModels();
     syncProviderUI();
+    restoreSavedState();
 
     // ================================================================
     //  API Key Toggle
@@ -267,14 +576,23 @@
         for (const file of fileListObj) {
             // Avoid duplicates by name + size
             if (uploadedFiles.some(f => f.file.name === file.name && f.file.size === file.size)) continue;
-            uploadedFiles.push({ file, text: null, base64: null, mimeType: null });
+            uploadedFiles.push({
+                file,
+                text: null,
+                base64: null,
+                mimeType: null,
+                storedDataUrl: null,
+                storedDataUrlPromise: null,
+            });
         }
         renderFileList();
+        scheduleStateSave();
     }
 
     function removeFile(index) {
         uploadedFiles.splice(index, 1);
         renderFileList();
+        scheduleStateSave();
     }
 
     function renderFileList() {
@@ -304,7 +622,10 @@
         const file = promptFileInput.files[0];
         if (!file) return;
         const reader = new FileReader();
-        reader.onload = () => { promptText.value = reader.result; };
+        reader.onload = () => {
+            promptText.value = reader.result;
+            scheduleStateSave();
+        };
         reader.readAsText(file);
         promptFileInput.value = '';
     });
@@ -328,11 +649,13 @@
     async function startProcessing(apiKey, prompt, provider, model, reasoningEffort) {
         isProcessing = true;
         processBtn.disabled = true;
+        resetBtn.disabled = true;
         lastApiKey = apiKey;
         lastPrompt = prompt;
         lastProvider = provider;
         lastModel = model;
         lastReasoningEffort = reasoningEffort;
+        scheduleStateSave();
         processBtn.innerHTML = `
             <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
             Processing…`;
@@ -358,6 +681,7 @@
         // Prepare results UI
         resultsSection.classList.add('visible');
         resultsGrid.innerHTML = '';
+        resultTexts.clear();
         const cards = uploadedFiles.map((item, i) => createResultCard(item, i));
         updateStats();
 
@@ -375,6 +699,7 @@
                         resultTexts.set(item.file.name, result);
                         setCardResult(cards[i], result);
                         setCardStatus(cards[i], 'done');
+                        scheduleStateSave();
                     } catch (err) {
                         setCardError(cards[i], err.message || 'Unknown error', item);
                         setCardStatus(cards[i], 'error');
@@ -388,10 +713,12 @@
         await Promise.allSettled(promises);
         isProcessing = false;
         processBtn.disabled = false;
+        resetBtn.disabled = false;
         processBtn.innerHTML = `
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/></svg>
             Process All Files`;
         showToast('All files processed!', 'success');
+        scheduleStateSave();
     }
 
     // ================================================================
@@ -664,9 +991,6 @@
     // ================================================================
     //  Result Cards
     // ================================================================
-    // Map cards to their fileItems for retry/download
-    const cardFileMap = new WeakMap();
-
     function createResultCard(fileItem, index) {
         const fileName = fileItem.file.name;
         const card = document.createElement('div');
@@ -796,6 +1120,7 @@
             resultTexts.set(fileItem.file.name, result);
             setCardResult(card, result);
             setCardStatus(card, 'done');
+            scheduleStateSave();
             showToast(`${fileItem.file.name} retried successfully!`, 'success');
         } catch (err) {
             setCardError(card, err.message || 'Unknown error', fileItem);
@@ -854,6 +1179,15 @@
                 resolve(base64);
             };
             reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+            reader.readAsDataURL(file);
+        });
+    }
+
+    function readFileAsDataUrl(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(new Error(`Failed to save ${file.name}`));
             reader.readAsDataURL(file);
         });
     }
